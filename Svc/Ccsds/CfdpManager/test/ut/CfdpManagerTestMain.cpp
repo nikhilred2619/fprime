@@ -852,6 +852,86 @@ TEST(Coverage, PrioritySearchCallback) {
     tester.testPrioritySearchCallback();
 }
 
+TEST(RxStaging, Class1TimeoutLeavesNoPartialFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1TimeoutLeavesNoPartialFile();
+}
+
+TEST(RxStaging, Class1TimeoutKeepsExistingFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1TimeoutKeepsExistingFile();
+}
+
+TEST(RxStaging, Class2TimeoutLeavesNoPartialFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2TimeoutLeavesNoPartialFile();
+}
+
+TEST(RxStaging, Class2TimeoutKeepsExistingFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2TimeoutKeepsExistingFile();
+}
+
+TEST(RxStaging, Class1CommitReplacesExistingFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1CommitReplacesExistingFile();
+}
+
+TEST(RxStaging, Class1CrcMismatchKeepsExistingFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1CrcMismatchKeepsExistingFile();
+}
+
+TEST(RxStaging, Class2CrcMismatchKeepsExistingFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2CrcMismatchKeepsExistingFile();
+}
+
+TEST(RxStaging, Class1EofCancelKeepsExistingFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1EofCancelKeepsExistingFile();
+}
+
+TEST(RxStaging, Class2LateMetadataCommits) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2LateMetadataCommits();
+}
+
+TEST(RxStaging, Class2LateMetadataCrossDeviceCommits) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2LateMetadataCrossDeviceCommits();
+}
+
+TEST(RxStaging, Class2LateMetadataCrossDeviceCopyFailure) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2LateMetadataCrossDeviceCopyFailure();
+}
+
+TEST(RxStaging, Class2LateMetadataSizeMismatchThenRetransmit) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2LateMetadataSizeMismatchThenRetransmit();
+}
+
+TEST(RxStaging, ExistingStagingFileNotReplaced) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingExistingStagingFileNotReplaced();
+}
+
+TEST(RxStaging, Class2LateMetadataExistingStagingFileNotReplaced) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass2LateMetadataExistingStagingFileNotReplaced();
+}
+
+TEST(RxStaging, CommitFailureKeepsDestination) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingCommitFailureKeepsDestination();
+}
+
+TEST(RxStaging, PathFormat) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingPathFormat();
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

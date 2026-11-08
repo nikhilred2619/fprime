@@ -515,6 +515,37 @@ class Transaction {
     Status::T rCheckCrc(U32 expected_crc);
 
     /************************************************************************/
+    /** @brief Builds the staging path a received file is written to before it is committed.
+     *
+     * The path is the destination followed by ".<channel>-<source EID>-<sequence>.part", so it
+     * lies in the destination's directory and differs for every live receive transaction.
+     *
+     * @param dst Validated destination path
+     * @param staging Output staging path
+     * @retval Cfdp::Status::SUCCESS if the full path fits, otherwise Cfdp::Status::ERROR
+     */
+    Status::T rFormatStagingPath(const Fw::StringBase& dst, Fw::StringBase& staging) const;
+
+    /************************************************************************/
+    /** @brief Renames the owned staging file onto the destination.
+     *
+     * Emits RxFileRenameFailed on failure; the staging file then stays owned and is removed
+     * when the transaction ends. The destination is changed only by a successful rename.
+     *
+     * @retval Cfdp::Status::SUCCESS if the destination now holds the received file
+     * @retval Cfdp::Status::ERROR otherwise
+     */
+    Status::T rCommitFile();
+
+    /************************************************************************/
+    /** @brief Removes the received-data file this transaction owns, if any.
+     *
+     * Only a file this transaction created is removed; the destination is never touched.
+     * Emits FileRemoveFailed if removal fails. Does nothing for transmit transactions.
+     */
+    void rDiscardOwnedFile();
+
+    /************************************************************************/
     /** @brief Checks R2 transaction state for transaction completion status.
      *
      * This function is called anywhere there's a desire to know if the
@@ -715,9 +746,11 @@ class Transaction {
      *
      * It's possible that metadata PDU was missed in cf_cfdp.c, or that
      * it was re-sent. This function checks if it was already processed,
-     * and if not, handles it. If there was a temp file opened due to
-     * missed metadata PDU, it will move the file to the correct
-     * destination according to the metadata PDU.
+     * and if not, handles it. File data received before the metadata PDU
+     * is in a temp file; it is moved to a newly claimed staging file beside
+     * the destination, which is renamed onto the destination only once the
+     * file checksum passes. A transaction that has already failed ignores
+     * further metadata PDUs.
      *
      * @param pdu Buffer containing the metadata PDU to process
      */

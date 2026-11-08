@@ -340,9 +340,10 @@ void Transaction::rCancel() {
 }
 
 void Transaction::rInit() {
-    Os::File::Status status;
+    Os::File::Status status = Os::File::OTHER_ERROR;
     Fw::String tmpDir;
-    Fw::String dst;
+    Fw::String path;
+    RxFileOwned owned = RxFileOwned::RX_FILE_NONE;
 
     if (this->m_state == TxnState::TXN_STATE_R2) {
         if (!this->m_flags.rx.md_recv) {
@@ -352,31 +353,42 @@ void Transaction::rInit() {
              * hold the temp filename which is defined by the sequence number and the source entity ID */
 
             // Create destination filepath with format: <tmpDir>/<src_eid>:<seq_num>.tmp
-            dst.format("%s/%" CFDP_PRI_ENTITY_ID ":%" CFDP_PRI_TRANSACTION_SEQ ".tmp", tmpDir.toChar(),
-                       this->m_history->src_eid, this->m_history->seq_num);
+            if (path.format("%s/%" CFDP_PRI_ENTITY_ID ":%" CFDP_PRI_TRANSACTION_SEQ ".tmp", tmpDir.toChar(),
+                            this->m_history->src_eid, this->m_history->seq_num) == Fw::FormatStatus::SUCCESS) {
+                this->m_history->fnames.dst_filename = path;
+                owned = RxFileOwned::RX_FILE_TMP;
 
-            this->m_history->fnames.dst_filename = dst;
-
-            this->m_cfdpManager->log_ACTIVITY_LO_RxTempFileCreated(this->getClass(), this->m_history->src_eid,
-                                                                   this->m_history->seq_num,
-                                                                   this->m_history->fnames.dst_filename);
+                this->m_cfdpManager->log_ACTIVITY_LO_RxTempFileCreated(this->getClass(), this->m_history->src_eid,
+                                                                       this->m_history->seq_num,
+                                                                       this->m_history->fnames.dst_filename);
+            }
         }
 
         this->m_engine->armAckTimer(this);
     }
 
-    status = this->m_fd.open(this->m_history->fnames.dst_filename.toChar(), Os::File::OPEN_CREATE, Os::File::OVERWRITE);
+    // With metadata the data is staged beside the destination, which is never opened here
+    if (this->m_flags.rx.md_recv &&
+        (this->rFormatStagingPath(this->m_history->fnames.dst_filename, path) == Cfdp::Status::SUCCESS)) {
+        owned = RxFileOwned::RX_FILE_STAGING;
+    }
+
+    // Create the file exclusively: an existing file of that name is not this transaction's to replace
+    if (owned != RxFileOwned::RX_FILE_NONE) {
+        status = this->m_fd.open(path.toChar(), Os::File::OPEN_CREATE, Os::File::NO_OVERWRITE);
+    }
     if (status != Os::File::OP_OK) {
         this->m_cfdpManager->log_WARNING_LO_RxFileCreateFailed(this->getClass(), this->m_history->src_eid,
-                                                               this->m_history->seq_num,
-                                                               this->m_history->fnames.dst_filename, status);
+                                                               this->m_history->seq_num, path, status);
         this->m_cfdpManager->incrementFaultFileOpen(this->m_chan_num);
         if (this->m_state == TxnState::TXN_STATE_R2) {
             this->r2SetFinTxnStatus(TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
         } else {
+            this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
             this->r1Reset();
         }
     } else {
+        this->m_flags.rx.file_owned = owned;
         this->m_state_data.receive.sub_state = RxSubState::RX_SUB_STATE_FILEDATA;
     }
 }
@@ -419,6 +431,69 @@ Status::T Transaction::rCheckCrc(U32 expected_crc) {
     }
 
     return ret;
+}
+
+Status::T Transaction::rFormatStagingPath(const Fw::StringBase& dst, Fw::StringBase& staging) const {
+    // The channel, source and sequence number identify a live receive transaction uniquely, so no two
+    // transactions share a staging path. A path that does not fit is refused rather than truncated.
+    const Fw::FormatStatus status =
+        staging.format("%s.%" PRIu32 "-%" CFDP_PRI_ENTITY_ID "-%" CFDP_PRI_TRANSACTION_SEQ ".part", dst.toChar(),
+                       static_cast<U32>(this->m_chan_num), this->m_history->src_eid, this->m_history->seq_num);
+    return (status == Fw::FormatStatus::SUCCESS) ? Cfdp::Status::SUCCESS : Cfdp::Status::ERROR;
+}
+
+Status::T Transaction::rCommitFile() {
+    Status::T ret = Cfdp::Status::ERROR;
+    Fw::String stagingName;
+    Os::FileSystem::Status fileSysStatus = Os::FileSystem::OTHER_ERROR;
+
+    if (this->m_fd.isOpen()) {
+        this->m_fd.close();
+    }
+
+    // The staging file is beside the destination, so this is a single rename on the same file system
+    if ((this->m_flags.rx.file_owned == RxFileOwned::RX_FILE_STAGING) &&
+        (this->rFormatStagingPath(this->m_history->fnames.dst_filename, stagingName) == Cfdp::Status::SUCCESS)) {
+        fileSysStatus = Os::FileSystem::rename(stagingName.toChar(), this->m_history->fnames.dst_filename.toChar());
+    }
+
+    if (fileSysStatus == Os::FileSystem::OP_OK) {
+        this->m_flags.rx.file_owned = RxFileOwned::RX_FILE_NONE;
+        ret = Cfdp::Status::SUCCESS;
+    } else {
+        this->m_cfdpManager->log_WARNING_LO_RxFileRenameFailed(this->getClass(), this->m_history->src_eid,
+                                                               this->m_history->seq_num, stagingName,
+                                                               this->m_history->fnames.dst_filename, fileSysStatus);
+        this->m_cfdpManager->incrementFaultFileRename(this->m_chan_num);
+    }
+
+    return ret;
+}
+
+void Transaction::rDiscardOwnedFile() {
+    Fw::String path;
+    bool owned = false;
+
+    // m_flags is shared with transmit transactions, so file_owned is only meaningful for a receive
+    if ((this->m_history != nullptr) && (this->m_history->dir == Direction::DIRECTION_RX)) {
+        if (this->m_flags.rx.file_owned == RxFileOwned::RX_FILE_TMP) {
+            path = this->m_history->fnames.dst_filename;
+            owned = true;
+        } else if (this->m_flags.rx.file_owned == RxFileOwned::RX_FILE_STAGING) {
+            owned = (this->rFormatStagingPath(this->m_history->fnames.dst_filename, path) == Cfdp::Status::SUCCESS);
+        }
+        this->m_flags.rx.file_owned = RxFileOwned::RX_FILE_NONE;
+    }
+
+    if (owned) {
+        if (this->m_fd.isOpen()) {
+            this->m_fd.close();
+        }
+        const Os::FileSystem::Status fileSysStatus = Os::FileSystem::removeFile(path.toChar());
+        if (fileSysStatus != Os::FileSystem::OP_OK) {
+            this->m_cfdpManager->log_WARNING_LO_FileRemoveFailed(path, fileSysStatus);
+        }
+    }
 }
 
 void Transaction::r2Complete(I32 ok_to_send_nak) {
@@ -638,6 +713,7 @@ void Transaction::r1SubstateRecvEof(const Fw::Buffer& buffer) {
         // Bad EOF, reset transaction
         this->m_cfdpManager->log_WARNING_LO_FailEofPduDeserialization(this->getChannelId(),
                                                                       static_cast<I32>(deserStatus));
+        this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_PROTOCOL_ERROR);
         this->r1Reset();
         return;
     }
@@ -647,15 +723,23 @@ void Transaction::r1SubstateRecvEof(const Fw::Buffer& buffer) {
     ConditionCode cc = eof.getConditionCode();
 
     if (ret == Cfdp::Status::SUCCESS) {
-        /* Only check CRC if no error condition code */
+        /* Only check CRC if no error condition code; otherwise rSubstateRecvEof() set the status */
         if (cc == ConditionCode::CONDITION_CODE_NO_ERROR) {
-            /* Verify CRC */
+            /* Verify CRC; CFDP_R_CheckCrc() generates an event on failure */
             if (this->rCheckCrc(crc) == Cfdp::Status::SUCCESS) {
                 /* successfully processed the file */
                 this->m_keep = Cfdp::Keep::KEEP; /* save the file */
+                if (this->rCommitFile() != Cfdp::Status::SUCCESS) {
+                    this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
+                }
+            } else {
+                this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_FILE_CHECKSUM_FAILURE);
             }
-            /* if file failed to process, there's nothing to do. CFDP_R_CheckCrc() generates an event on failure */
         }
+    } else if (ret == Cfdp::Status::REC_PDU_FSIZE_MISMATCH_ERROR) {
+        this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_FILE_SIZE_ERROR);
+    } else {
+        this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_PROTOCOL_ERROR);
     }
 
     /* after exit, always reset since we are done */
@@ -732,6 +816,7 @@ void Transaction::r1SubstateRecvFileData(const Fw::Buffer& buffer) {
         // Bad file data PDU, reset transaction
         this->m_cfdpManager->log_WARNING_LO_FailFileDataPduDeserialization(this->getChannelId(),
                                                                            static_cast<I32>(deserStatus));
+        this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_PROTOCOL_ERROR);
         this->r1Reset();
         return;
     }
@@ -912,7 +997,13 @@ Status::T Transaction::r2CalcCrcChunk() {
                 this->m_fd.close();
             }
 
-            fileStatus = this->m_fd.open(this->m_history->fnames.dst_filename.toChar(), Os::File::OPEN_READ);
+            Fw::String stagingName;
+            fileStatus = Os::File::OTHER_ERROR;
+            if ((this->m_flags.rx.file_owned == RxFileOwned::RX_FILE_STAGING) &&
+                (this->rFormatStagingPath(this->m_history->fnames.dst_filename, stagingName) ==
+                 Cfdp::Status::SUCCESS)) {
+                fileStatus = this->m_fd.open(stagingName.toChar(), Os::File::OPEN_READ);
+            }
             if (fileStatus != Os::File::OP_OK) {
                 this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_FILE_SIZE_ERROR);
                 ret = Cfdp::Status::ERROR;
@@ -982,9 +1073,14 @@ Status::T Transaction::r2CalcCrcChunk() {
                 /* CRC matched! We are happy */
                 this->m_keep = Cfdp::Keep::KEEP; /* save the file */
 
-                /* set FIN PDU status */
-                this->m_state_data.receive.r2.dc = FinDeliveryCode::FIN_DELIVERY_CODE_COMPLETE;
-                this->m_state_data.receive.r2.fs = FinFileStatus::FIN_FILE_STATUS_RETAINED;
+                /* the file is retained only once it is at its destination */
+                if (this->rCommitFile() == Cfdp::Status::SUCCESS) {
+                    /* set FIN PDU status */
+                    this->m_state_data.receive.r2.dc = FinDeliveryCode::FIN_DELIVERY_CODE_COMPLETE;
+                    this->m_state_data.receive.r2.fs = FinFileStatus::FIN_FILE_STATUS_RETAINED;
+                } else {
+                    this->r2SetFinTxnStatus(TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
+                }
             } else {
                 this->r2SetFinTxnStatus(TxnStatus::TXN_STATUS_FILE_CHECKSUM_FAILURE);
             }
@@ -1049,12 +1145,17 @@ void Transaction::r2RecvFinAck(const Fw::Buffer& buffer) {
 
 void Transaction::r2RecvMd(const Fw::Buffer& buffer) {
     Fw::String fname;
+    Fw::String dstName;
+    Fw::String stagingName;
+    Os::File claim;
     Os::File::Status fileStatus;
     Os::FileSystem::Status fileSysStatus;
     bool success = true;
 
-    /* it isn't an error to get another MD PDU, right? */
-    if (!this->m_flags.rx.md_recv) {
+    /* it isn't an error to get another MD PDU, right? Only a transaction that has not failed and still
+     * holds its temp file acts on one, so a retransmitted MD PDU can never move a file a second time */
+    if (!this->m_flags.rx.md_recv && (this->m_flags.rx.file_owned == RxFileOwned::RX_FILE_TMP) &&
+        !TxnStatusIsError(this->m_history->txn_stat)) {
         /* NOTE: this->m_flags.rx.md_recv always 1 in R1, so this is R2 only */
         /* parse the md PDU. this will overwrite the transaction's history, which contains our filename. so let's
          * save the filename in a local buffer so it can be used with moveFile upon successful parsing of
@@ -1085,7 +1186,11 @@ void Transaction::r2RecvMd(const Fw::Buffer& buffer) {
             return;
         }
 
-        /* successfully obtained md PDU */
+        /* successfully obtained md PDU. recvMd() put the destination in dst_filename; until the temp file
+         * has been moved, dst_filename keeps naming the temp file so cleanup can only remove that file */
+        dstName = this->m_history->fnames.dst_filename;
+        this->m_history->fnames.dst_filename = fname;
+
         if (this->m_flags.rx.eof_recv) {
             /* EOF was received, so check that md and EOF sizes match */
             if (this->m_state_data.receive.r2.eof_size != this->m_fsize) {
@@ -1098,29 +1203,59 @@ void Transaction::r2RecvMd(const Fw::Buffer& buffer) {
             }
         }
 
-        if (success) {
-            /* close and rename file */
-            this->m_fd.close();
+        if (success && (this->rFormatStagingPath(dstName, stagingName) != Cfdp::Status::SUCCESS)) {
+            this->m_cfdpManager->log_WARNING_LO_RxFileCreateFailed(
+                this->getClass(), this->m_history->src_eid, this->m_history->seq_num, dstName, Os::File::OTHER_ERROR);
+            this->r2SetFinTxnStatus(TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
+            this->m_cfdpManager->incrementFaultFileOpen(this->m_chan_num);
+            success = false;
+        }
 
-            fileSysStatus = Os::FileSystem::moveFile(fname.toChar(), this->m_history->fnames.dst_filename.toChar());
-            if (fileSysStatus != Os::FileSystem::OP_OK) {
-                this->m_cfdpManager->log_WARNING_LO_RxFileRenameFailed(
-                    this->getClass(), this->m_history->src_eid, this->m_history->seq_num, fname,
-                    this->m_history->fnames.dst_filename, fileSysStatus);
+        if (success) {
+            /* claim the staging file before moving the temp file into it */
+            fileStatus = claim.open(stagingName.toChar(), Os::File::OPEN_CREATE, Os::File::NO_OVERWRITE);
+            if (fileStatus != Os::File::OP_OK) {
+                this->m_cfdpManager->log_WARNING_LO_RxFileCreateFailed(
+                    this->getClass(), this->m_history->src_eid, this->m_history->seq_num, stagingName, fileStatus);
                 this->r2SetFinTxnStatus(TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
-                this->m_cfdpManager->incrementFaultFileRename(this->m_chan_num);
+                this->m_cfdpManager->incrementFaultFileOpen(this->m_chan_num);
                 success = false;
             } else {
-                // File was successfully renamed, open for writing
-                fileStatus = this->m_fd.open(this->m_history->fnames.dst_filename.toChar(), Os::File::OPEN_WRITE);
-                if (fileStatus != Os::File::OP_OK) {
-                    this->m_cfdpManager->log_WARNING_LO_RxFileReopenFailed(
-                        this->getClass(), this->m_history->src_eid, this->m_history->seq_num,
-                        this->m_history->fnames.dst_filename, fileStatus);
+                claim.close();
+                this->m_fd.close();
+
+                // A rename replaces only the claimed file; across file systems moveFile copies into it
+                fileSysStatus = Os::FileSystem::moveFile(fname.toChar(), stagingName.toChar());
+                if (fileSysStatus != Os::FileSystem::OP_OK) {
+                    this->m_cfdpManager->log_WARNING_LO_RxFileRenameFailed(this->getClass(), this->m_history->src_eid,
+                                                                           this->m_history->seq_num, fname, stagingName,
+                                                                           fileSysStatus);
                     this->r2SetFinTxnStatus(TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
-                    this->m_cfdpManager->incrementFaultFileOpen(this->m_chan_num);
+                    this->m_cfdpManager->incrementFaultFileRename(this->m_chan_num);
                     success = false;
+
+                    // The staging file was created above, so it is this transaction's to remove; the temp
+                    // file is still owned and is removed when the transaction ends
+                    fileSysStatus = Os::FileSystem::removeFile(stagingName.toChar());
+                    if (fileSysStatus != Os::FileSystem::OP_OK) {
+                        this->m_cfdpManager->log_WARNING_LO_FileRemoveFailed(stagingName, fileSysStatus);
+                    }
                 }
+            }
+        }
+
+        if (success) {
+            /* the temp file is gone and its data is in the staging file */
+            this->m_history->fnames.dst_filename = dstName;
+            this->m_flags.rx.file_owned = RxFileOwned::RX_FILE_STAGING;
+
+            fileStatus = this->m_fd.open(stagingName.toChar(), Os::File::OPEN_WRITE);
+            if (fileStatus != Os::File::OP_OK) {
+                this->m_cfdpManager->log_WARNING_LO_RxFileReopenFailed(
+                    this->getClass(), this->m_history->src_eid, this->m_history->seq_num, stagingName, fileStatus);
+                this->r2SetFinTxnStatus(TxnStatus::TXN_STATUS_FILESTORE_REJECTION);
+                this->m_cfdpManager->incrementFaultFileOpen(this->m_chan_num);
+                success = false;
             }
 
             if (success) {

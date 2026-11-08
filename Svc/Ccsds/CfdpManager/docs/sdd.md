@@ -117,7 +117,7 @@ The design of `CfdpManager` assumes the following:
 
 6. For Class 2 transfers, the remote entity implements the CFDP protocol correctly and responds to PDUs according to the specification.
 
-7. For Class 2 transfers in which File Data PDUs arrive before the Metadata PDU, received data is staged in a temporary file under `ChannelConfig.tmp_dir` and moved to the final destination once the Metadata PDU arrives. In every other case (Metadata first, and all Class 1 transfers) the destination file named by the Metadata PDU is opened directly; `tmp_dir` staging is **not** a general mitigation for untrusted destination paths (see Security Considerations).
+7. Received data is never written to the destination file named by the Metadata PDU. It is written to a staging file beside the destination, `<destination>.<channel>-<source EID>-<sequence number>.part`, which the transaction creates exclusively: if a file of that name already exists it is left untouched and the transfer fails with `FILESTORE_REJECTION`. Only once the transfer is complete and its checksum has passed is the staging file renamed onto the destination, replacing any existing file of that name in a single step; for Class 2 this happens before the FIN reports the file as retained. A receive that ends any other way (checksum mismatch, cancellation, inactivity timeout, NAK or ACK limit, filestore error, abandonment) removes the files it created and leaves the destination as it was. For Class 2 transfers in which File Data PDUs arrive before the Metadata PDU, data is first written to a temporary file under `ChannelConfig.tmp_dir`, also created exclusively, and moved into the staging file when the Metadata PDU arrives; if `tmp_dir` is on a different file system, that move copies the data received so far. A transaction that has failed ignores further Metadata PDUs. A staging or temporary file left behind by a reset prevents a later transfer with the same channel, source and sequence number until it is removed. Staging is **not** a mitigation for untrusted destination paths (see Security Considerations).
 
 8. Port-initiated file transfers (via `fileIn`) use default configuration parameters (`FileInDefaultChannel`, `FileInDefaultDestEntityId`, `FileInDefaultClass`, `FileInDefaultKeep`, and `FileInDefaultPriority`).
 
@@ -519,7 +519,7 @@ The CFDP Manager provides comprehensive event reporting covering all aspects of 
 |------------|----------|-------------|
 | RxAckLimitReached | warning low | RX ACK limit reached for transaction, no fin-ack sent |
 | RxTempFileCreated | activity low | RX transaction creating temp file without metadata |
-| RxFileCreateFailed | warning low | RX transaction failed to create file |
+| RxFileCreateFailed | warning low | RX transaction failed to create its temporary or staging file, including because a file of that name already exists |
 | RxDestPathRejected | warning high | RX transaction rejected a Metadata PDU destination path; carries the path, the channel's `rx_dir`, and the reason (see Security Considerations) |
 | RxCrcMismatch | warning low | RX transaction CRC mismatch: expected vs actual |
 | RxNakLimitReached | warning low | RX transaction NAK limit reached |
@@ -531,8 +531,8 @@ The CFDP Manager provides comprehensive event reporting covering all aspects of 
 | RxSeekCrcFailed | warning low | RX transaction failed to seek during CRC calculation |
 | RxReadCrcFailed | warning low | RX transaction failed to read, or read fewer bytes than expected, during CRC calculation |
 | RxEofMdSizeMismatch | warning low | RX transaction EOF/metadata size mismatch |
-| RxFileRenameFailed | warning low | RX transaction failed to rename temp file to final file |
-| RxFileReopenFailed | warning low | RX transaction failed to reopen file after rename |
+| RxFileRenameFailed | warning low | RX transaction failed to move its temporary file into the staging file, or to rename the staging file onto the destination; the destination is unchanged |
+| RxFileReopenFailed | warning low | RX transaction failed to reopen the staging file after moving the temporary file into it |
 | RxInactivityTimeout | warning low | RX transaction inactivity timer expired |
 | RxInvalidDirectiveCode | warning low | RX transaction received invalid directive code for substate |
 | RxTransactionLimitReached | warning low | Dropping packet due to max RX transactions reached |
@@ -630,7 +630,7 @@ The CFDP Manager provides comprehensive event reporting covering all aspects of 
 | ChannelConfig.dequeue_enabled | Enable or disable transaction dequeuing and processing for this channel. Can be used to pause channel activity |
 | ChannelConfig.move_dir | Directory path to move source files after successful TX (transmit) transactions when keep is set to DELETE. If set, provides an archive mechanism to preserve files instead of deleting them. If empty or if the move fails, source files are deleted from the filesystem. Only applies to sending files, not receiving |
 | ChannelConfig.max_outgoing_pdus_per_cycle | Maximum number of outgoing PDUs to transmit per execution cycle. Throttles transmission rate to prevent overwhelming downstream components |
-| ChannelConfig.tmp_dir | Directory path for temporary files during receive (RX) transactions. Only used for Class 2 transfers whose File Data PDUs arrive before the Metadata PDU; the temporary file is moved to the final destination once Metadata arrives |
+| ChannelConfig.tmp_dir | Directory path for temporary files during receive (RX) transactions. Only used for Class 2 transfers whose File Data PDUs arrive before the Metadata PDU; the temporary file is moved to the staging file beside the destination once Metadata arrives, which copies the data if `tmp_dir` is on a different file system |
 | ChannelConfig.fail_dir | Directory path for storing files from polling operations that failed to transfer successfully. If empty or if the move fails, files are deleted from the filesystem |
 | ChannelConfig.rx_dir | Receive sandbox directory. If non-empty, destination paths from incoming Metadata PDUs are resolved against this directory and rejected if they resolve outside it (see Security Considerations). If empty (default), destination paths are accepted as-is |
 

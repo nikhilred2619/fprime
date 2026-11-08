@@ -1105,6 +1105,9 @@ void Engine::finishTransaction(Transaction* txn, bool keep_history) {
         }
     }
 
+    // A receive that ends without committing its file removes it; a committed file is no longer owned
+    txn->rDiscardOwnedFile();
+
     if (txn->m_history != nullptr) {
         // Emit completion events for successful transactions
         if (!TxnStatusIsError(txn->m_history->txn_stat)) {

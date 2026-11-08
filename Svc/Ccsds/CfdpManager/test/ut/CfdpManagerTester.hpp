@@ -726,6 +726,60 @@ class CfdpManagerTester final : public CfdpManagerGTestBase {
 
   public:
     // ----------------------------------------------------------------------
+    // RX staging, commit and cleanup (issue #6230)
+    // ----------------------------------------------------------------------
+
+    void testRxStagingClass1TimeoutLeavesNoPartialFile();
+    void testRxStagingClass1TimeoutKeepsExistingFile();
+    void testRxStagingClass2TimeoutLeavesNoPartialFile();
+    void testRxStagingClass2TimeoutKeepsExistingFile();
+    void testRxStagingClass1CommitReplacesExistingFile();
+    void testRxStagingClass1CrcMismatchKeepsExistingFile();
+    void testRxStagingClass2CrcMismatchKeepsExistingFile();
+    void testRxStagingClass1EofCancelKeepsExistingFile();
+    void testRxStagingClass2LateMetadataCommits();
+    void testRxStagingClass2LateMetadataCrossDeviceCommits();
+    void testRxStagingClass2LateMetadataCrossDeviceCopyFailure();
+    void testRxStagingClass2LateMetadataSizeMismatchThenRetransmit();
+    void testRxStagingExistingStagingFileNotReplaced();
+    void testRxStagingClass2LateMetadataExistingStagingFileNotReplaced();
+    void testRxStagingCommitFailureKeepsDestination();
+    void testRxStagingPathFormat();
+
+  private:
+    //! Set every channel's config to the default timers and limits with the given tmp_dir
+    void rxStagingConfigure(const char* tmpDir);
+    //! Staging path the component uses for the test destination and sequence number
+    void rxStagingPath(TransactionSeq seq, Fw::String& path);
+    //! Temp path the component uses for File Data received before Metadata
+    void rxStagingTmpPath(TransactionSeq seq, Fw::String& path);
+    void rxStagingWriteFile(const char* path, const U8* data, FwSizeType size);
+    //! Assert the file exists with exactly the given contents
+    void rxStagingExpectFile(const char* path, const U8* data, FwSizeType size);
+    void rxStagingExpectNoFile(const char* path);
+    void rxStagingRemove(const char* path);
+    //! Remove every file and directory the staging tests may have left for a sequence number
+    void rxStagingCleanup(TransactionSeq seq);
+    void rxStagingSendMetadata(TransactionSeq seq, Cfdp::Class::T cfdpClass, FileSize fileSize);
+    void rxStagingSendData(TransactionSeq seq, Cfdp::Class::T cfdpClass);
+    void rxStagingSendEof(TransactionSeq seq,
+                          Cfdp::Class::T cfdpClass,
+                          Cfdp::ConditionCode conditionCode,
+                          U32 checksum);
+    //! Assert exactly one RxFileTransferFailed carrying the given condition code
+    void rxStagingExpectFailed(Cfdp::ConditionCode conditionCode);
+    //! Run run1Hz until the transaction is recycled; returns false if it never is
+    bool rxStagingRunUntilFreed(TransactionSeq seq);
+    //! Run a Class 2 receive until its FIN is sent, acknowledge it, and run until recycled
+    void rxStagingRunClass2ToFinAck(TransactionSeq seq);
+    //! Pick a tmp_dir on a different file system than test/ut/output, if there is one
+    bool rxStagingCrossDeviceTmpDir(const char*& tmpDir);
+    void rxStagingTimeout(Cfdp::Class::T cfdpClass, bool existing, TransactionSeq seq);
+    void rxStagingCrcMismatch(Cfdp::Class::T cfdpClass, TransactionSeq seq);
+    void rxStagingLateMetadataCommit(const char* tmpDir, TransactionSeq seq);
+
+  public:
+    // ----------------------------------------------------------------------
     // Coverage Tests
     //
     // Target trivial paths in CfdpManager.cpp/.hpp and transaction-dependent
