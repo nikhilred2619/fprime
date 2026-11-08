@@ -184,6 +184,25 @@ void CfdpManagerTester::rxStagingRunClass2ToFinAck(TransactionSeq seq) {
     ASSERT_TRUE(this->rxStagingRunUntilFreed(seq));
 }
 
+void CfdpManagerTester::rxStagingClass1Segments(TransactionSeq seq,
+                                                const U8* payload,
+                                                FileSize fileSize,
+                                                const FileSize* offsets,
+                                                const U16* sizes,
+                                                U32 count) {
+    this->rxStagingSendMetadata(seq, Cfdp::Class::CLASS_1, fileSize);
+    for (U32 i = 0; i < count; ++i) {
+        this->sendFileDataPdu(RX_CHANNEL, TEST_GROUND_EID, this->component.getLocalEidParam(), seq, offsets[i],
+                              sizes[i], &payload[offsets[i]], Cfdp::Class::CLASS_1);
+        this->component.doDispatch();
+    }
+    // The EOF declares the full size and carries the checksum of the full payload
+    this->sendEofPdu(RX_CHANNEL, TEST_GROUND_EID, this->component.getLocalEidParam(), seq,
+                     Cfdp::ConditionCode::CONDITION_CODE_NO_ERROR, crcOf(payload, fileSize), fileSize,
+                     Cfdp::Class::CLASS_1);
+    this->component.doDispatch();
+}
+
 bool CfdpManagerTester::rxStagingCrossDeviceTmpDir(const char*& tmpDir) {
     // /dev/shm is a tmpfs on Linux; it only gives a real cross-device move when it is not on the
     // same file system as the test output directory
@@ -543,6 +562,126 @@ void CfdpManagerTester::testRxStagingPathFormat() {
     EXPECT_EQ(Cfdp::Status::ERROR, txn->rFormatStagingPath(Fw::String(longDst), staging));
 
     ASSERT_TRUE(this->rxStagingRunUntilFreed(seq));
+    this->rxStagingCleanup(seq);
+}
+
+void CfdpManagerTester::testRxStagingClass1MissingTrailingZerosNotCommitted() {
+    const TransactionSeq seq = 7017;
+    Fw::String staging;
+    this->rxStagingPath(seq, staging);
+    this->rxStagingConfigure("test/ut/output");
+    this->rxStagingCleanup(seq);
+    this->rxStagingWriteFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+
+    // 10 data bytes followed by 90 zero bytes; zeros add nothing to the CFDP checksum, so the
+    // checksum of the 10 bytes received matches the checksum of the whole file
+    U8 payload[RX_DECLARED_SIZE] = {};
+    ::memcpy(payload, RX_NEW_DATA, sizeof(RX_NEW_DATA));
+    const FileSize offsets[] = {0};
+    const U16 sizes[] = {RX_CHUNK_SIZE};
+    this->rxStagingClass1Segments(seq, payload, RX_DECLARED_SIZE, offsets, sizes, 1);
+
+    this->rxStagingExpectFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+    this->rxStagingExpectNoFile(staging.toChar());
+    ASSERT_EVENTS_RxFileTransferCompleted_SIZE(0);
+    this->rxStagingExpectFailed(Cfdp::ConditionCode::CONDITION_CODE_FILE_SIZE_ERROR);
+
+    this->rxStagingCleanup(seq);
+}
+
+void CfdpManagerTester::testRxStagingClass1MissingMiddleSegmentNotCommitted() {
+    const TransactionSeq seq = 7018;
+    Fw::String staging;
+    this->rxStagingPath(seq, staging);
+    this->rxStagingConfigure("test/ut/output");
+    this->rxStagingCleanup(seq);
+    this->rxStagingWriteFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+
+    // The missing middle segment is zeros, so the checksum alone cannot detect it, and the last
+    // segment makes the staging file reach the declared size
+    U8 payload[3 * RX_CHUNK_SIZE] = {};
+    ::memcpy(&payload[0], RX_NEW_DATA, RX_CHUNK_SIZE);
+    ::memcpy(&payload[2 * RX_CHUNK_SIZE], RX_NEW_DATA, RX_CHUNK_SIZE);
+    const FileSize offsets[] = {0, 2 * RX_CHUNK_SIZE};
+    const U16 sizes[] = {RX_CHUNK_SIZE, RX_CHUNK_SIZE};
+    this->rxStagingClass1Segments(seq, payload, sizeof(payload), offsets, sizes, 2);
+
+    this->rxStagingExpectFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+    this->rxStagingExpectNoFile(staging.toChar());
+    ASSERT_EVENTS_RxFileTransferCompleted_SIZE(0);
+    this->rxStagingExpectFailed(Cfdp::ConditionCode::CONDITION_CODE_FILE_SIZE_ERROR);
+
+    this->rxStagingCleanup(seq);
+}
+
+void CfdpManagerTester::testRxStagingClass1OutOfOrderSegmentsCommit() {
+    const TransactionSeq seq = 7019;
+    Fw::String staging;
+    this->rxStagingPath(seq, staging);
+    this->rxStagingConfigure("test/ut/output");
+    this->rxStagingCleanup(seq);
+    this->rxStagingWriteFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+
+    U8 payload[3 * RX_CHUNK_SIZE];
+    for (FwSizeType i = 0; i < sizeof(payload); ++i) {
+        payload[i] = static_cast<U8>(i + 1);
+    }
+    const FileSize offsets[] = {2 * RX_CHUNK_SIZE, 0, RX_CHUNK_SIZE};
+    const U16 sizes[] = {RX_CHUNK_SIZE, RX_CHUNK_SIZE, RX_CHUNK_SIZE};
+    this->rxStagingClass1Segments(seq, payload, sizeof(payload), offsets, sizes, 3);
+
+    this->rxStagingExpectFile(RX_DST, payload, sizeof(payload));
+    this->rxStagingExpectNoFile(staging.toChar());
+    ASSERT_EVENTS_RxFileTransferCompleted_SIZE(1);
+    ASSERT_EVENTS_RxFileTransferFailed_SIZE(0);
+
+    this->rxStagingCleanup(seq);
+}
+
+void CfdpManagerTester::testRxStagingClass1DuplicateSegmentKeepsExistingFile() {
+    const TransactionSeq seq = 7020;
+    Fw::String staging;
+    this->rxStagingPath(seq, staging);
+    this->rxStagingConfigure("test/ut/output");
+    this->rxStagingCleanup(seq);
+    this->rxStagingWriteFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+
+    // Class 1 adds every File Data PDU to its running checksum, so a repeated segment makes the
+    // checksum disagree: the transfer fails and the destination is kept
+    U8 payload[2 * RX_CHUNK_SIZE];
+    for (FwSizeType i = 0; i < sizeof(payload); ++i) {
+        payload[i] = static_cast<U8>(i + 1);
+    }
+    const FileSize offsets[] = {0, RX_CHUNK_SIZE, 0};
+    const U16 sizes[] = {RX_CHUNK_SIZE, RX_CHUNK_SIZE, RX_CHUNK_SIZE};
+    this->rxStagingClass1Segments(seq, payload, sizeof(payload), offsets, sizes, 3);
+
+    this->rxStagingExpectFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+    this->rxStagingExpectNoFile(staging.toChar());
+    ASSERT_EVENTS_RxFileTransferCompleted_SIZE(0);
+    this->rxStagingExpectFailed(Cfdp::ConditionCode::CONDITION_CODE_FILE_CHECKSUM_FAILURE);
+
+    this->rxStagingCleanup(seq);
+}
+
+void CfdpManagerTester::testRxStagingClass1ZeroLengthCommits() {
+    const TransactionSeq seq = 7021;
+    Fw::String staging;
+    this->rxStagingPath(seq, staging);
+    this->rxStagingConfigure("test/ut/output");
+    this->rxStagingCleanup(seq);
+    this->rxStagingWriteFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+
+    // A zero-length file has no File Data PDUs and nothing missing
+    this->rxStagingClass1Segments(seq, RX_NEW_DATA, 0, nullptr, nullptr, 0);
+
+    FwSizeType size = 1;
+    ASSERT_EQ(Os::FileSystem::OP_OK, Os::FileSystem::getFileSize(RX_DST, size));
+    EXPECT_EQ(0u, size);
+    this->rxStagingExpectNoFile(staging.toChar());
+    ASSERT_EVENTS_RxFileTransferCompleted_SIZE(1);
+    ASSERT_EVENTS_RxFileTransferFailed_SIZE(0);
+
     this->rxStagingCleanup(seq);
 }
 

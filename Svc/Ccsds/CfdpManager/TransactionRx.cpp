@@ -725,8 +725,13 @@ void Transaction::r1SubstateRecvEof(const Fw::Buffer& buffer) {
     if (ret == Cfdp::Status::SUCCESS) {
         /* Only check CRC if no error condition code; otherwise rSubstateRecvEof() set the status */
         if (cc == ConditionCode::CONDITION_CODE_NO_ERROR) {
-            /* Verify CRC; CFDP_R_CheckCrc() generates an event on failure */
-            if (this->rCheckCrc(crc) == Cfdp::Status::SUCCESS) {
+            /* Every byte must have arrived, since missing zero bytes do not change the checksum;
+             * then verify the CRC. CFDP_R_CheckCrc() generates an event on failure */
+            if ((this->m_chunks == nullptr) ||
+                (this->m_chunks->chunks.computeGaps(1, this->m_fsize, 0, nullptr, nullptr) != 0)) {
+                this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_FILE_SIZE_ERROR);
+                this->m_cfdpManager->incrementFaultFileSizeMismatch(this->m_chan_num);
+            } else if (this->rCheckCrc(crc) == Cfdp::Status::SUCCESS) {
                 /* successfully processed the file */
                 this->m_keep = Cfdp::Keep::KEEP; /* save the file */
                 if (this->rCommitFile() != Cfdp::Status::SUCCESS) {
@@ -830,6 +835,10 @@ void Transaction::r1SubstateRecvFileData(const Fw::Buffer& buffer) {
     if (ret == Cfdp::Status::SUCCESS) {
         /* class 1 digests CRC */
         this->m_crc.update(fd.getData(), fd.getOffset(), static_cast<U32>(fd.getDataSize()));
+        /* and records which bytes arrived, so a missing segment is caught at EOF */
+        if (this->m_chunks != nullptr) {
+            this->m_chunks->chunks.add(fd.getOffset(), static_cast<FileSize>(fd.getDataSize()));
+        }
     } else {
         /* Reset transaction on failure */
         this->r1Reset();

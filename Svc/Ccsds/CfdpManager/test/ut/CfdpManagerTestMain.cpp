@@ -932,6 +932,31 @@ TEST(RxStaging, PathFormat) {
     tester.testRxStagingPathFormat();
 }
 
+TEST(RxStaging, Class1MissingTrailingZerosNotCommitted) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1MissingTrailingZerosNotCommitted();
+}
+
+TEST(RxStaging, Class1MissingMiddleSegmentNotCommitted) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1MissingMiddleSegmentNotCommitted();
+}
+
+TEST(RxStaging, Class1OutOfOrderSegmentsCommit) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1OutOfOrderSegmentsCommit();
+}
+
+TEST(RxStaging, Class1DuplicateSegmentKeepsExistingFile) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1DuplicateSegmentKeepsExistingFile();
+}
+
+TEST(RxStaging, Class1ZeroLengthCommits) {
+    Svc::Ccsds::Cfdp::CfdpManagerTester tester;
+    tester.testRxStagingClass1ZeroLengthCommits();
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

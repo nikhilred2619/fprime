@@ -745,6 +745,11 @@ class CfdpManagerTester final : public CfdpManagerGTestBase {
     void testRxStagingClass2LateMetadataExistingStagingFileNotReplaced();
     void testRxStagingCommitFailureKeepsDestination();
     void testRxStagingPathFormat();
+    void testRxStagingClass1MissingTrailingZerosNotCommitted();
+    void testRxStagingClass1MissingMiddleSegmentNotCommitted();
+    void testRxStagingClass1OutOfOrderSegmentsCommit();
+    void testRxStagingClass1DuplicateSegmentKeepsExistingFile();
+    void testRxStagingClass1ZeroLengthCommits();
 
   private:
     //! Set every channel's config to the default timers and limits with the given tmp_dir
@@ -772,6 +777,14 @@ class CfdpManagerTester final : public CfdpManagerGTestBase {
     bool rxStagingRunUntilFreed(TransactionSeq seq);
     //! Run a Class 2 receive until its FIN is sent, acknowledge it, and run until recycled
     void rxStagingRunClass2ToFinAck(TransactionSeq seq);
+    //! Send a Class 1 transfer whose File Data PDUs carry only the given segments of the payload,
+    //! then an EOF with the full size and the full payload's checksum
+    void rxStagingClass1Segments(TransactionSeq seq,
+                                 const U8* payload,
+                                 FileSize fileSize,
+                                 const FileSize* offsets,
+                                 const U16* sizes,
+                                 U32 count);
     //! Pick a tmp_dir on a different file system than test/ut/output, if there is one
     bool rxStagingCrossDeviceTmpDir(const char*& tmpDir);
     void rxStagingTimeout(Cfdp::Class::T cfdpClass, bool existing, TransactionSeq seq);
