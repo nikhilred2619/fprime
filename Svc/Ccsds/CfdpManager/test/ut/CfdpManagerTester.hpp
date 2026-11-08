@@ -748,7 +748,7 @@ class CfdpManagerTester final : public CfdpManagerGTestBase {
     void testRxStagingClass1MissingTrailingZerosNotCommitted();
     void testRxStagingClass1MissingMiddleSegmentNotCommitted();
     void testRxStagingClass1OutOfOrderSegmentsCommit();
-    void testRxStagingClass1DuplicateSegmentKeepsExistingFile();
+    void testRxStagingClass1DuplicateSegmentCommits();
     void testRxStagingClass1ZeroLengthCommits();
 
   private:

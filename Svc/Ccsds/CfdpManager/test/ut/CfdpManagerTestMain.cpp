@@ -947,9 +947,9 @@ TEST(RxStaging, Class1OutOfOrderSegmentsCommit) {
     tester.testRxStagingClass1OutOfOrderSegmentsCommit();
 }
 
-TEST(RxStaging, Class1DuplicateSegmentKeepsExistingFile) {
+TEST(RxStaging, Class1DuplicateSegmentCommits) {
     Svc::Ccsds::Cfdp::CfdpManagerTester tester;
-    tester.testRxStagingClass1DuplicateSegmentKeepsExistingFile();
+    tester.testRxStagingClass1DuplicateSegmentCommits();
 }
 
 TEST(RxStaging, Class1ZeroLengthCommits) {

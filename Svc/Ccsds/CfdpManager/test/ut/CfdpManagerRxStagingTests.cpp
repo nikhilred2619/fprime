@@ -36,6 +36,7 @@ constexpr U16 RX_CHUNK_SIZE = 10;
 const U8 RX_NEW_DATA[RX_CHUNK_SIZE] = {'N', 'E', 'W', '-', 'D', 'A', 'T', 'A', '-', '1'};
 const U8 RX_ORIGINAL[] = {'O', 'R', 'I', 'G', 'I', 'N', 'A', 'L', '-', 'G', 'O', 'O', 'D', '-', 'F', 'I', 'L', 'E'};
 const U8 RX_FOREIGN[] = {'F', 'O', 'R', 'E', 'I', 'G', 'N'};
+const U8 RX_FOREIGN_CHUNK[RX_CHUNK_SIZE] = {'R', 'E', 'P', 'E', 'A', 'T', 'E', 'D', '-', '0'};
 
 //! Upper bound on run1Hz cycles for any transaction in these tests to be recycled
 constexpr U32 RX_MAX_CYCLES = 300;
@@ -236,9 +237,10 @@ void CfdpManagerTester::rxStagingTimeout(Cfdp::Class::T cfdpClass, bool existing
     ASSERT_EVENTS_RxFileTransferCompleted_SIZE(0);
     ASSERT_EVENTS_FileRemoveFailed_SIZE(0);
     if (cfdpClass == Cfdp::Class::CLASS_1) {
-        // A Class 1 receive is recycled by its inactivity timer without being finished
+        // A Class 1 receive ends on its inactivity timer and is reported as failed
         ASSERT_EVENTS_RxInactivityTimeout_SIZE(1);
-        ASSERT_EVENTS_DanglingFileHandleClosed_SIZE(1);
+        ASSERT_EVENTS_DanglingFileHandleClosed_SIZE(0);
+        this->rxStagingExpectFailed(Cfdp::ConditionCode::CONDITION_CODE_INACTIVITY_DETECTED);
     } else {
         ASSERT_EVENTS_RxFileTransferFailed_SIZE(1);
     }
@@ -638,7 +640,7 @@ void CfdpManagerTester::testRxStagingClass1OutOfOrderSegmentsCommit() {
     this->rxStagingCleanup(seq);
 }
 
-void CfdpManagerTester::testRxStagingClass1DuplicateSegmentKeepsExistingFile() {
+void CfdpManagerTester::testRxStagingClass1DuplicateSegmentCommits() {
     const TransactionSeq seq = 7020;
     Fw::String staging;
     this->rxStagingPath(seq, staging);
@@ -646,20 +648,33 @@ void CfdpManagerTester::testRxStagingClass1DuplicateSegmentKeepsExistingFile() {
     this->rxStagingCleanup(seq);
     this->rxStagingWriteFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
 
-    // Class 1 adds every File Data PDU to its running checksum, so a repeated segment makes the
-    // checksum disagree: the transfer fails and the destination is kept
+    // A segment whose whole range was already received, here resent with different bytes, is ignored:
+    // it is not written again and not counted twice in the checksum, so the file matches the
+    // checksummed data
     U8 payload[2 * RX_CHUNK_SIZE];
     for (FwSizeType i = 0; i < sizeof(payload); ++i) {
         payload[i] = static_cast<U8>(i + 1);
     }
-    const FileSize offsets[] = {0, RX_CHUNK_SIZE, 0};
-    const U16 sizes[] = {RX_CHUNK_SIZE, RX_CHUNK_SIZE, RX_CHUNK_SIZE};
-    this->rxStagingClass1Segments(seq, payload, sizeof(payload), offsets, sizes, 3);
+    const FileSize offsets[] = {0, RX_CHUNK_SIZE};
+    const U16 sizes[] = {RX_CHUNK_SIZE, RX_CHUNK_SIZE};
+    this->rxStagingSendMetadata(seq, Cfdp::Class::CLASS_1, sizeof(payload));
+    for (U32 i = 0; i < 2; ++i) {
+        this->sendFileDataPdu(RX_CHANNEL, TEST_GROUND_EID, this->component.getLocalEidParam(), seq, offsets[i],
+                              sizes[i], &payload[offsets[i]], Cfdp::Class::CLASS_1);
+        this->component.doDispatch();
+    }
+    this->sendFileDataPdu(RX_CHANNEL, TEST_GROUND_EID, this->component.getLocalEidParam(), seq, 0, RX_CHUNK_SIZE,
+                          RX_FOREIGN_CHUNK, Cfdp::Class::CLASS_1);
+    this->component.doDispatch();
+    this->sendEofPdu(RX_CHANNEL, TEST_GROUND_EID, this->component.getLocalEidParam(), seq,
+                     Cfdp::ConditionCode::CONDITION_CODE_NO_ERROR, crcOf(payload, sizeof(payload)), sizeof(payload),
+                     Cfdp::Class::CLASS_1);
+    this->component.doDispatch();
 
-    this->rxStagingExpectFile(RX_DST, RX_ORIGINAL, sizeof(RX_ORIGINAL));
+    this->rxStagingExpectFile(RX_DST, payload, sizeof(payload));
     this->rxStagingExpectNoFile(staging.toChar());
-    ASSERT_EVENTS_RxFileTransferCompleted_SIZE(0);
-    this->rxStagingExpectFailed(Cfdp::ConditionCode::CONDITION_CODE_FILE_CHECKSUM_FAILURE);
+    ASSERT_EVENTS_RxFileTransferCompleted_SIZE(1);
+    ASSERT_EVENTS_RxFileTransferFailed_SIZE(0);
 
     this->rxStagingCleanup(seq);
 }

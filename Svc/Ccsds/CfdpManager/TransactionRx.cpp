@@ -320,6 +320,11 @@ void Transaction::rTick(I32* cont /* unused */) {
          * wakes up or if the network delivers severely delayed PDUs at
          * some future point, then they will be seen as spurious.  They
          * will no longer be associable with this transaction at all */
+        if (this->m_state != TxnState::TXN_STATE_HOLD) {
+            /* never finished, so report it as failed and remove its file before it is forgotten */
+            this->m_engine->setTxnStatus(this, TxnStatus::TXN_STATUS_INACTIVITY_DETECTED);
+            this->m_engine->finishTransaction(this, true);
+        }
         this->m_chan->recycleTransaction(this);
 
         /* NOTE: this must be the last thing in here.  Do not use txn after this */
@@ -828,6 +833,18 @@ void Transaction::r1SubstateRecvFileData(const Fw::Buffer& buffer) {
 
     /* got file data PDU? */
     ret = this->m_engine->recvFd(this, fd);
+
+    /* File Data whose whole range was already received is ignored: digesting it again would fail a good
+     * transfer's checksum. A partial overlap is processed as usual. Received coverage is never
+     * over-reported, so new data is never skipped. */
+    const FileSize offset = fd.getOffset();
+    const FileSize size = static_cast<FileSize>(fd.getDataSize());
+    if ((ret == Cfdp::Status::SUCCESS) && (this->m_chunks != nullptr) && (size > 0) && (size <= this->m_fsize) &&
+        (offset <= (this->m_fsize - size)) &&
+        (this->m_chunks->chunks.computeGaps(1, offset + size, offset, nullptr, nullptr) == 0)) {
+        return;
+    }
+
     if (ret == Cfdp::Status::SUCCESS) {
         ret = this->rProcessFd(buffer);
     }
